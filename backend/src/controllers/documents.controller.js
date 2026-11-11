@@ -1,3 +1,5 @@
+const { pipeline } = require('node:stream');
+
 function toPublicDocument(document) {
   return {
     id: document.id,
@@ -10,6 +12,10 @@ function toPublicDocument(document) {
 
 function createDocumentsController(documentsService) {
   return {
+    uploadConfig(req, res) {
+      res.json(documentsService.getUploadConfig());
+    },
+
     async upload(req, res) {
       const document = await documentsService.upload(req.file, req.user.id);
       res.status(201).json(toPublicDocument(document));
@@ -21,17 +27,17 @@ function createDocumentsController(documentsService) {
     },
 
     async download(req, res, next) {
-      const { document, filePath } = await documentsService.getDownload(req.params.id, req.user.id);
-      res.download(
-        filePath,
-        document.originalName,
-        { headers: { 'Content-Type': document.contentType } },
-        (error) => {
-          if (error && !res.headersSent) {
-            next(error);
-          }
-        },
-      );
+      const { document, stream } = await documentsService.getDownload(req.params.id, req.user.id);
+      res.attachment(document.originalName);
+      res.type(document.contentType);
+      res.set('X-Content-Type-Options', 'nosniff');
+      pipeline(stream, res, (error) => {
+        if (error && !res.headersSent) {
+          next(error);
+        } else if (error) {
+          res.destroy(error);
+        }
+      });
     },
   };
 }

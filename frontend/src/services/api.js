@@ -11,7 +11,9 @@ export class ApiError extends Error {
 
 async function request(path, { token, headers = {}, ...options } = {}) {
   const requestHeaders = new Headers(headers);
-  requestHeaders.set('Accept', 'application/json');
+  if (!requestHeaders.has('Accept')) {
+    requestHeaders.set('Accept', 'application/json');
+  }
   if (token) {
     requestHeaders.set('Authorization', `Bearer ${token}`);
   }
@@ -37,17 +39,36 @@ async function request(path, { token, headers = {}, ...options } = {}) {
   return response;
 }
 
-export async function listDocuments({ token } = {}) {
-  const response = await request('/documents', { token });
+export async function login(username, password) {
+  const response = await request('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  return response.json();
+}
+
+export async function logout({ token } = {}) {
+  await request('/auth/logout', { token, method: 'POST' });
+}
+
+export async function getUploadConfig({ signal } = {}) {
+  const response = await request('/config', { signal });
+  return response.json();
+}
+
+export async function listDocuments({ token, signal } = {}) {
+  const response = await request('/documents', { token, signal });
   const payload = await response.json();
   return Array.isArray(payload.documents) ? payload.documents : [];
 }
 
-export async function uploadDocument(file, { token } = {}) {
+export async function uploadDocument(file, { token, signal } = {}) {
   const formData = new FormData();
   formData.append('file', file);
   const response = await request('/upload', {
     token,
+    signal,
     method: 'POST',
     body: formData,
   });
@@ -68,9 +89,10 @@ function getDownloadFileName(contentDisposition, fallbackName) {
   return quotedName || fallbackName;
 }
 
-export async function downloadDocument(id, fallbackName, { token } = {}) {
+export async function downloadDocument(id, fallbackName, { token, signal } = {}) {
   const response = await request(`/documents/${encodeURIComponent(id)}/download`, {
     token,
+    signal,
     headers: { Accept: '*/*' },
   });
   return {

@@ -10,7 +10,7 @@ Entregar uma aplicação web para usuários autenticados enviarem, consultarem e
 - **Operador:** configura as contas permitidas e os parâmetros da aplicação antes de iniciá-la.
 - As contas são pré-configuradas pelo operador. Não há cadastro público, recuperação de senha ou administração de usuários pela interface.
 - O serviço roda como uma única instância Node.js. Sessões e metadados não são compartilhados entre instâncias.
-- A autenticação usa tokens bearer opacos mantidos em memória. Reiniciar o processo invalida todos os tokens.
+- A autenticação usa tokens bearer opacos mantidos em memória, com no máximo uma sessão ativa por usuário. Reiniciar o processo invalida todos os tokens.
 
 ## 3. Escopo
 
@@ -56,6 +56,7 @@ Entregar uma aplicação web para usuários autenticados enviarem, consultarem e
 | RNF-08 | Erros enviados ao cliente devem ser consistentes e não incluir stack traces, caminhos locais, credenciais ou detalhes internos. Segredos não devem ser registrados em logs. |
 | RNF-09 | Configuração operacional deve vir de variáveis de ambiente, com valores padrão documentados quando aplicáveis. |
 | RNF-10 | Interface deve oferecer estados de carregamento, sucesso, lista vazia e erro, e controles operáveis por teclado com rótulos acessíveis. |
+| RNF-11 | Limitar uploads simultâneos, tentativas de login e armazenamento por usuário/instância para reduzir risco de exaustão de recursos. |
 
 ### Configuração mínima
 
@@ -67,8 +68,10 @@ Entregar uma aplicação web para usuários autenticados enviarem, consultarem e
 | `DMS_ALLOWED_EXTENSIONS` | Extensões aceitas. | `.pdf,.docx,.xlsx,.pptx,.txt,.csv`; lista separada por vírgula. |
 | `DMS_USERS_JSON` | Contas permitidas e credenciais configuradas pelo operador. | Obrigatória; array JSON com `id`, `username` e `passwordHash`. Nunca retornar ou registrar seu conteúdo. |
 | `DMS_SESSION_TTL_SECONDS` | Validade máxima de um token. | `3600` segundos; expirado, o usuário deve autenticar novamente. |
+| `DMS_MAX_STORAGE_PER_USER_BYTES` | Limite de bytes armazenados por usuário durante a sessão do processo. | `1073741824` (1 GiB). |
+| `DMS_MAX_STORAGE_BYTES` | Limite total do diretório, incluindo arquivos órfãos de processos anteriores. | `1073741824` (1 GiB). |
 
-Configuração ausente ou inválida que impeça autenticação ou armazenamento deve impedir a inicialização e produzir mensagem operacional sem revelar segredos. A implantação deve proteger o acesso ao ambiente e usar HTTPS fora do desenvolvimento local.
+Configuração ausente ou inválida que impeça autenticação ou armazenamento deve impedir a inicialização e produzir mensagem operacional sem revelar segredos. O diretório deve ser privado ao processo (`0700`) e a inicialização deve contabilizar arquivos já existentes, sem removê-los automaticamente. A implantação deve proteger o acesso ao ambiente e usar HTTPS fora do desenvolvimento local.
 
 `DMS_USERS_JSON` deve conter objetos `{ "id": "...", "username": "...", "passwordHash": "scrypt$<salt-base64url>$<key-base64url>" }`. IDs e nomes normalizados devem ser únicos. O hash usa salt aleatório por usuário com pelo menos 16 bytes e chave derivada de 64 bytes; a verificação deve usar comparação em tempo constante. Senhas em texto puro não são aceitas na configuração.
 
@@ -80,7 +83,7 @@ Configuração ausente ou inválida que impeça autenticação ou armazenamento 
 | --- | --- | --- |
 | `id` | string | Identificador estável e único do usuário. |
 | `username` | string | Nome de login único, normalizado para comparação. |
-| credencial | segredo | Material de autenticação fornecido pela configuração; nunca incluído em respostas ou logs. |
+| `passwordHash` | string | Hash scrypt no formato `scrypt$<salt-base64url>$<key-base64url>`; nunca incluído em respostas ou logs. |
 
 ### Documento (metadados em memória)
 
@@ -115,6 +118,14 @@ Exceto `GET /health` e `POST /auth/login`, as rotas exigem `Authorization: Beare
 - Sucesso: `204`; o token é invalidado imediatamente.
 - Sem token válido: `401`.
 
+O login limita falhas por IP e a concorrência de derivações scrypt. Uma nova sessão do mesmo usuário invalida a anterior.
+
+### `GET /config`
+
+- Não requer autenticação.
+- Sucesso: `200`, `{ "maxFileSize": 10485760, "allowedExtensions": [".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".csv"] }`, refletindo a configuração ativa do backend.
+- A resposta não contém usuários, caminhos de armazenamento ou segredos. O frontend usa esses valores para apresentar a política vigente, mas o servidor continua sendo a autoridade de validação.
+
 ### `POST /upload`
 
 - Entrada: `multipart/form-data` com exatamente um arquivo no campo `file`.
@@ -148,13 +159,14 @@ Exceto `GET /health` e `POST /auth/login`, as rotas exigem `Authorization: Beare
 | `404` | Documento inexistente ou não pertencente ao usuário. |
 | `413` | Arquivo excede o limite configurado. |
 | `415` | Tipo ou extensão não permitidos. |
+| `429` | Limite de tentativas de login ou uploads simultâneos atingido. |
 | `500` | Falha inesperada; resposta genérica sem detalhes internos. |
 
 ## 8. Interface e fluxos
 
 1. **Entrada:** formulário de usuário e senha; erros de autenticação são apresentados sem distinguir usuário inexistente de senha incorreta.
 2. **Carregamento da lista:** após autenticação, buscar documentos do usuário. Enquanto aguarda, indicar carregamento; em falha, permitir nova tentativa; lista vazia deve ter estado próprio.
-3. **Upload:** selecionar um arquivo, validar tamanho/formato também no cliente para feedback e enviar ao servidor. O cliente não substitui a validação do backend. Exibir sucesso e atualizar a lista; falha não deve remover documentos já listados.
+3. **Upload:** obter formatos e tamanho máximo de `GET /config`, validar também no cliente para feedback e enviar ao servidor. O cliente não substitui a validação do backend. Exibir sucesso e atualizar a lista; falha não deve remover documentos já listados.
 4. **Download:** ação por documento usando seu identificador. Erros de rede ou documento indisponível devem ser comunicados sem expor detalhes internos.
 5. **Sessão:** permitir logout; em `401`, limpar o token local e retornar à entrada. O token não deve ser persistido em armazenamento durável do navegador; manter apenas durante a sessão ativa da página.
 
@@ -162,7 +174,7 @@ Os componentes previstos no workshop são `UploadComponent`, `DocumentList` e `D
 
 ## 9. Arquitetura e responsabilidades
 
-- `routes/`: declarar `/auth/login`, `/auth/logout`, `/upload`, `/documents`, `/documents/:id/download` e `/health`, conectando middlewares aos controllers.
+- `routes/`: declarar `/auth/login`, `/auth/logout`, `/config`, `/upload`, `/documents`, `/documents/:id/download` e `/health`, conectando middlewares aos controllers.
 - `controllers/`: validar formato de entrada HTTP e mapear resultados/erros para status e respostas.
 - `services/`: aplicar regras de autenticação, autorização por dono, validação de upload e fluxo de documentos.
 - `repositories/`: encapsular usuários configurados, sessões em memória, metadados em memória e acesso ao filesystem local.
@@ -174,11 +186,12 @@ Os componentes previstos no workshop são `UploadComponent`, `DocumentList` e `D
 - Usuário configurado consegue autenticar; credenciais inválidas são rejeitadas sem revelar qual campo falhou.
 - Token válido permite as operações; logout e expiração fazem o token deixar de funcionar.
 - Usuário A não consegue listar nem baixar documentos de usuário B, inclusive tentando adivinhar o identificador; a resposta de download não confirma a existência do documento alheio.
-- Upload de cada formato permitido, dentro do limite, gera metadados corretos e arquivo no diretório local; formato não permitido e arquivo acima do limite retornam os status definidos.
+- Upload de cada formato permitido, dentro dos limites por arquivo, usuário e instância, gera metadados corretos e arquivo no diretório local; formato não permitido e arquivo acima do limite retornam os status definidos.
 - Nome de arquivo com caracteres incomuns não altera o caminho de destino nem o cabeçalho de download; tentativa de caminho externo não é aceita.
 - Lista vazia, sucesso, carregamento, erros HTTP e logout são tratados pela interface.
 - Após reiniciar o backend, os arquivos podem continuar em disco, mas metadados e tokens anteriores não estão disponíveis; nova autenticação é necessária.
 - `GET /health` responde sem autenticação e sem dados sensíveis.
+- `GET /config` reflete a allowlist e o tamanho máximo configurados; a UI não mantém uma cópia independente dessa política.
 - Testes backend (`node --test`) cobrem contratos, validações, autorização e isolamento; build frontend (`npm run build`) conclui sem erros.
 
 ## 11. Ordem sugerida de implementação
@@ -192,4 +205,4 @@ Os componentes previstos no workshop são `UploadComponent`, `DocumentList` e `D
 
 ## 12. Referências e estado atual
 
-Esta especificação expande [`spec-template.md`](spec-template.md), respeitando as restrições de [instruções do projeto](../../.github/copilot-instructions.md). O seed atual contém apenas `GET /health` no backend e uma tela inicial no frontend; upload, listagem, download e autenticação são requisitos futuros, não funcionalidades já implementadas. O teste backend atual é somente de fumaça.
+Esta especificação expande [`spec-template.md`](spec-template.md), respeitando as restrições de [instruções do projeto](../../.github/copilot-instructions.md). O teste de integração verifica autenticação, isolamento e upload/download no app montado; login, sessão e quotas permanecem em memória nesta fase.
