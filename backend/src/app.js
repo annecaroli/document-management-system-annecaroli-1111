@@ -11,14 +11,32 @@
 // usando multer com diskStorage. Não utilize provedores externos.
 
 const express = require('express');
+const path = require('node:path');
+const createDocumentsRepository = require('./repositories/documents.repository');
+const createDocumentsService = require('./services/documents.service');
+const createDocumentsController = require('./controllers/documents.controller');
+const createDocumentsRouter = require('./routes/documents.routes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const storageDir = path.resolve(process.env.DMS_STORAGE_DIR || path.join(__dirname, '../storage'));
+const maxFileSize = Number.parseInt(process.env.DMS_MAX_FILE_SIZE_BYTES || '10485760', 10);
+
+if (!Number.isSafeInteger(maxFileSize) || maxFileSize <= 0) {
+  throw new Error('DMS_MAX_FILE_SIZE_BYTES deve ser um inteiro positivo');
+}
 
 app.use(express.json());
 
-// Endpoint de verificação de saúde. As demais rotas (/upload, /documents,
-// /documents/:id/download) serão implementadas durante o Passo 2.
+const documentsRepository = createDocumentsRepository({ storageDir });
+const documentsService = createDocumentsService(documentsRepository, {
+  allowedExtensions: process.env.DMS_ALLOWED_EXTENSIONS,
+  maxFileSize,
+});
+const documentsController = createDocumentsController(documentsService);
+
+app.use(createDocumentsRouter({ documentsController, storageDir, maxFileSize }));
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
